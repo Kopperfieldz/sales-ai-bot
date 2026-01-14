@@ -24,11 +24,17 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY")
 ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "")
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "").strip()
+PORT = int(os.getenv("PORT", "10000"))
 
 if not TELEGRAM_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN не знайдено у .env")
+    raise ValueError("TELEGRAM_BOT_TOKEN не знайдено у .env або Render env vars")
 if not OPENAI_KEY:
-    raise ValueError("OPENAI_API_KEY не знайдено у .env")
+    raise ValueError("OPENAI_API_KEY не знайдено у .env або Render env vars")
+if not RENDER_EXTERNAL_URL.startswith("https://"):
+    # Важливо для webhook. На Render має бути https://....
+    # Приклад: https://sales-ai-bot.onrender.com
+    raise ValueError("RENDER_EXTERNAL_URL має починатися з https:// (додай у Render env vars)")
 
 client = OpenAI(api_key=OPENAI_KEY)
 
@@ -54,7 +60,7 @@ PAY_URL_PRO = "https://send.monobank.ua/jar/29f2b26s2S"
 PAY_URL_PROPLUS = "https://send.monobank.ua/jar/eJAqpyUHz"
 
 # =========================================================
-# 3) ADMIN (from .env)
+# 3) ADMIN (from env)
 # =========================================================
 def parse_admin_ids(raw: str) -> set[int]:
     ids: set[int] = set()
@@ -550,7 +556,6 @@ async def list_paid_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     lines.extend([f"• {uid}" for uid in pro_plus] if pro_plus else ["—"])
 
     msg = "\n".join(lines)
-    # Telegram message length safety
     if len(msg) > 3500:
         msg = msg[:3500] + "\n…(обрізано)"
     await update.message.reply_text(msg, reply_markup=main_menu())
@@ -678,7 +683,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(answer, reply_markup=main_menu())
         except Exception as e:
             print("OPENAI ERROR:", repr(e))
-            await update.message.reply_text("⚠️ Помилка AI. Деталі в терміналі.", reply_markup=main_menu())
+            await update.message.reply_text("⚠️ Помилка AI. Деталі в логах Render.", reply_markup=main_menu())
         return
 
     if text == "⚡ Швидкі відповіді":
@@ -818,7 +823,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(answer, reply_markup=quick_replies_menu())
         except Exception as e:
             print("OPENAI ERROR:", repr(e))
-            await update.message.reply_text("⚠️ Помилка AI. Деталі в терміналі.", reply_markup=main_menu())
+            await update.message.reply_text("⚠️ Помилка AI. Деталі в логах Render.", reply_markup=main_menu())
         return
 
     # AI modes
@@ -859,16 +864,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(answer, reply_markup=main_menu())
     except Exception as e:
         print("OPENAI ERROR:", repr(e))
-        await update.message.reply_text("⚠️ Помилка AI. Деталі в терміналі.", reply_markup=main_menu())
+        await update.message.reply_text("⚠️ Помилка AI. Деталі в логах Render.", reply_markup=main_menu())
 
 
 # =========================================================
-# 11) APP ENTRY
+# 11) WEBHOOK STARTUP (Render)
 # =========================================================
+async def post_init(app):
+    # Виставляємо webhook при старті
+    webhook_url = f"{RENDER_EXTERNAL_URL}/{TELEGRAM_TOKEN}"
+    await app.bot.set_webhook(url=webhook_url)
+
+
 def main():
     _ensure_subscriptions_file()
 
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
 
     # user commands
     app.add_handler(CommandHandler("start", start))
@@ -886,8 +897,13 @@ def main():
     # text handler
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
-    print("BOT IS RUNNING...")
-    app.run_polling()
+    # Запуск webhook-сервера (Render)
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=PORT,
+        url_path=TELEGRAM_TOKEN,
+        webhook_url=f"{RENDER_EXTERNAL_URL}/{TELEGRAM_TOKEN}",
+    )
 
 
 if __name__ == "__main__":
